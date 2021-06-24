@@ -177,7 +177,39 @@ class Index
 
 
     }
+    
+    //add f2f
+    public function getF2fSettings(){
+        if (!Session::has("admin")){
+            return json($this->getReturn(-1,"没有登录"));
+        }
+        $f2fState = Db::name("f2fsetting")->where("vkey","f2fState")->find();
+        $appid = Db::name("f2fsetting")->where("vkey","appid")->find();
+        $public_key = Db::name("f2fsetting")->where("vkey","public_key")->find();
+        $private_key = Db::name("f2fsetting")->where("vkey","private_key")->find();
+        $notifyUrl = Db::name("f2fsetting")->where("vkey","notifyUrl")->find();
 
+        return json($this->getReturn(1,"成功",array(
+            "f2fState"=>$f2fState['vvalue'],
+            "appid"=>$appid['vvalue'],
+            "public_key"=>$public_key['vvalue'],
+            "private_key"=>$private_key['vvalue'],
+            "notifyUrl"=>$notifyUrl['vvalue'],
+        )));
+    }
+
+    public function saveF2fSetting(){
+        if (!Session::has("admin")){
+            return json($this->getReturn(-1,"没有登录"));
+        }
+        Db::name("f2fsetting")->where("vkey","f2fState")->update(array("vvalue"=>input("f2fState")));
+        Db::name("f2fsetting")->where("vkey","appid")->update(array("vvalue"=>input("appid")));
+        Db::name("f2fsetting")->where("vkey","public_key")->update(array("vvalue"=>input("public_key")));
+        Db::name("f2fsetting")->where("vkey","private_key")->update(array("vvalue"=>input("private_key")));
+        Db::name("f2fsetting")->where("vkey","notifyUrl")->update(array("vvalue"=>input("notifyUrl")));
+
+        return json($this->getReturn());
+    }
 
     public function addPayQrcode(){
         if (!Session::has("admin")){
