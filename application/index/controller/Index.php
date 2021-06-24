@@ -3,6 +3,7 @@ namespace app\index\controller;
 
 use think\Db;
 use think\facade\Session;
+use Omnipay\Omnipay;
 
 class Index
 {
@@ -73,6 +74,12 @@ class Index
                 "type" => "url",
                 "url" => "admin/setting.html?t=" . time(),
             ),
+            //add f2f
+            array(
+                "name" => "支付宝当面付",
+                "type" => "url",
+                "url" => "admin/f2fsetting.html?t=" . time(),
+            ),
             array(
                 "name" => "监控端设置",
                 "type" => "url",
@@ -122,7 +129,31 @@ class Index
         return json($menu);
 
     }
+    
+    private function createGateway(){
+        $AppId = Db::name("f2fsetting")->where("vkey", "appid")->find();
+        $AppId = $AppId['vvalue'];
+        
+        $PrivateKey = Db::name("f2fsetting")->where("vkey", "private_key")->find();
+        $PrivateKey = $PrivateKey['vvalue'];
+        
+        $PublicKey = Db::name("f2fsetting")->where("vkey", "public_key")->find();
+        $PublicKey = $PublicKey['vvalue'];
+        
+        $NotifyUrl = Db::name("f2fsetting")->where("vkey", "notifyUrl")->find();
+        $NotifyUrl = $NotifyUrl['vvalue'];
+        
+        $gateway = Omnipay::create('Alipay_AopF2F');
+        $gateway->setSignType('RSA2'); //RSA/RSA2
+        $gateway->setAppId($AppId);
+        $gateway->setPrivateKey($PrivateKey); // 可以是路径，也可以是密钥内容
+        $gateway->setAlipayPublicKey($PublicKey); // 可以是路径，也可以是密钥内容
+        
+        $gateway->setNotifyUrl($NotifyUrl);
 
+        return $gateway;
+    }
+    
     //创建订单
     public function createOrder()
     {
@@ -282,8 +313,30 @@ class Index
         //return "<script>window.location.href = '/payPage/pay.html?orderId=" + c.getOrderId() + "'</script>";
 
         if ($isHtml == 1) {
-
-            echo "<script>window.location.href = 'payPage/pay.html?orderId=" . $orderId . "'</script>";
+            $f2fState = Db::name("f2fsetting")->where("vkey", "f2fState")->find();
+            $f2fState = $f2fState['vvalue'];
+            if ($type == 2 && $f2fState == 1) {
+                $gateway = self::createGateway();
+                
+                $request = $gateway->purchase();
+                $request->setBizContent([
+                    'subject'      => "日用百货",
+                    'out_trade_no' => $orderId,
+                    'total_amount' => $price
+                ]);
+        
+                /** @var \Omnipay\Alipay\Responses\AopTradePreCreateResponse $response */
+                $aliResponse = $request->send();
+        
+                // 获取收款二维码内容
+                $qrCodeContent = $aliResponse->getQrCode();
+                
+                $payUrl = $qrCodeContent;
+                
+                echo "<script>window.location.href = 'payPage/aopf2f.html?orderId=" . $orderId . "&qrcode=" . $qrCodeContent . "'</script>";
+            } else {
+                echo "<script>window.location.href = 'payPage/pay.html?orderId=" . $orderId . "'</script>";
+            }
 
         } else {
             $time = Db::name("setting")->where("vkey", "close")->find();
@@ -545,6 +598,91 @@ class Index
     }
 
 
+    //f2f推送付款数据接口
+    public function f2fNotity(){
+        $this->closeEndOrder();
+
+        Db::name("setting")
+            ->where("vkey","lastpay")
+            ->update(
+                array(
+                    "vvalue"=>time()
+                )
+            );
+
+        $gateway = self::createGateway();
+        $aliRequest = $gateway->completePurchase();
+        $aliRequest->setParams($_POST);
+
+        try {
+            ///** @var \Omnipay\Alipay\Responses\AopCompletePurchaseResponse $response */
+            $aliResponse = $aliRequest->send();
+            $orderId = $aliResponse->data('out_trade_no');
+
+            if($aliResponse->isPaid()){
+                $res = Db::name("pay_order")
+                    ->where("order_id",$orderId)
+                    ->find();
+
+                if ($res){
+                    Db::name("tmp_price")
+                        ->where("oid",$res['order_id'])
+                        ->delete();
+
+                    Db::name("pay_order")->where("id",$res['id'])->update(array("state"=>1,"pay_date"=>time(),"close_date"=>time()));
+
+                    $url = $res['notify_url'];
+
+                    $res2 = Db::name("setting")->where("vkey","key")->find();
+                    $key = $res2['vvalue'];
+
+                    $p = "payId=".$res['pay_id']."&param=".$res['param']."&type=".$res['type']."&price=".$res['price']."&reallyPrice=".$res['really_price'];
+
+                    $sign = $res['pay_id'].$res['param'].$res['type'].$res['price'].$res['really_price'].$key;
+                    $p = $p . "&sign=".md5($sign);
+
+                    if (strpos($url,"?")===false){
+                        $url = $url."?".$p;
+                    }else{
+                        $url = $url."&".$p;
+                    }
+
+
+                    $re = $this->getCurl($url);
+                    if ($re=="success"){
+                        return json($this->getReturn());
+                    }else{
+                        Db::name("pay_order")->where("id",$res['id'])->update(array("state"=>2));
+
+                        return json($this->getReturn(-1,"异步通知失败"));
+                    }
+
+                }
+            }
+        } catch (\Exception $e) {
+            $data = array(
+                "close_date" => 0,
+                "create_date" => time(),
+                "is_auto" => 0,
+                "notify_url" => "",
+                "order_id" => "无订单转账",
+                "param" => "无订单转账",
+                "pay_date" => 0,
+                "pay_id" => "无订单转账",
+                "pay_url" => "",
+                "price" => 0,
+                "really_price" => 0,
+                "return_url" => "",
+                "state" => 1,
+                "type" => 2
+
+            );
+
+            Db::name("pay_order")->insert($data);
+            return json($this->getReturn());
+        }
+    }
+    
     //关闭过期订单接口(请用定时器至少1分钟调用一次)
     public function closeEndOrder(){
         $res = Db::name("setting")->where("vkey","lastheart")->find();
